@@ -1,108 +1,126 @@
-const express = require('express')
-const multer = require('multer')
-const cors = require('cors')
-const path = require('path')
-const mysql = require('mysql2/promise')
-const bcrypt = require('bcrypt')
-const fs = require('fs/promises')
-const { check, validationResult } = require('express-validator')
-const port = 3000
-const saltRounds = 10
+const express = require('express');
+const multer = require('multer');
+const cors = require('cors');
+const path = require('path');
+const mysql = require('mysql2/promise');
+const bcrypt = require('bcrypt');
+const fs = require('fs/promises');
+const { check, validationResult } = require('express-validator');
 
+const app = express();
+const port = 3000;
+const saltRounds = 10;
+
+// Database configuration
 const DB_CONFIG = {
     host: 'localhost',
     user: 'root',
     password: '',
     database: 'obomo'
-}
+};
 
-const app = express()
-app.use(cors())
+// Middleware
+app.use(cors());
+app.use(express.json());
 
+// Multer configuration for file uploads
 const storage = multer.diskStorage({
-    destination: function (req, file, callback) {
-        callback(null, path.join(__dirname, '../frontend/public'))
+    destination: (req, file, callback) => {
+        callback(null, path.join(__dirname, '../frontend/public'));
     },
-    filename: function (req, file, callback) {
-        const uniqueSuffix = Date.now() + '_' + Math.round(Math.random() * 1E9)
-        const fileExtension = file.originalname.split('.').pop()
-        callback(null, `profile_${uniqueSuffix}.${fileExtension}`)
+    filename: (req, file, callback) => {
+        const uniqueSuffix = `${Date.now()}_${Math.round(Math.random() * 1E9)}`;
+        const fileExtension = path.extname(file.originalname);
+        callback(null, `profile_${uniqueSuffix}${fileExtension}`);
     }
-})
+});
 
-const upload = multer({ storage: storage })
-app.use(express.json())
+const upload = multer({ storage });
 
+// Routes
+
+/**
+ * Signup route to register a new employee
+ */
 app.post('/signup', [
     check('email', "Please enter a valid email").isEmail(),
-    check('password', "Please enter a password whose length is greater than 7").isLength({ min: 7 })
+    check('password', "Password must be at least 7 characters long").isLength({ min: 7 })
 ], upload.single('profilepicture'), async (req, res) => {
-    const { firstname, lastname, email, password } = req.body
-    const errors = validationResult(req)
+    const { firstname, lastname, email, password } = req.body;
+    const errors = validationResult(req);
 
-    if (!errors.isEmpty) {
-        return res.status(400).json(errors.array())
+    if (!errors.isEmpty()) {
+        return res.status(400).json({ errors: errors.array() });
     }
 
     try {
-        const connection = await mysql.createConnection(DB_CONFIG)
-        const siqnupSql = `INSERT INTO employees (firstname,  lastname, email, password, filename) 
-        VALUES (?, ?, ?, ?, ?)`
-        const hashedPassword = await bcrypt.hash(password, saltRounds)
-        console.log(hashedPassword)
-        await connection.query(siqnupSql, [firstname, lastname, email, hashedPassword, req.file.filename])
+        const connection = await mysql.createConnection(DB_CONFIG);
 
-        connection.end()
-        return res.status(200).json(`${firstname} ${lastname} signup successful`)
+        const hashedPassword = await bcrypt.hash(password, saltRounds);
+        const signupSql = `INSERT INTO employees (firstname, lastname, email, password, filename) VALUES (?, ?, ?, ?, ?)`;
+
+        await connection.query(signupSql, [firstname, lastname, email, hashedPassword, req.file.filename]);
+
+        connection.end();
+        res.status(201).json({ message: `${firstname} ${lastname} signup successful` });
     } catch (error) {
-        return res.status(400).json(error)
+        console.error(error);
+        res.status(500).json({ error: 'An error occurred during signup.' });
     }
-})
+});
 
+/**
+ * Retrieve all employees
+ */
 app.get('/employees', async (req, res) => {
     try {
-        const connection = await mysql.createConnection(DB_CONFIG)
-        getEmployeesSql = `SELECT id, firstname,  lastname, email, filename FROM employees`
-        const [rows] = await connection.query(getEmployeesSql)
-        res.status(200).json({ employees: rows })
+        const connection = await mysql.createConnection(DB_CONFIG);
+        const getEmployeesSql = `SELECT id, firstname, lastname, email, filename FROM employees`;
+        const [rows] = await connection.query(getEmployeesSql);
+
+        connection.end();
+        res.status(200).json({ employees: rows });
     } catch (error) {
-        res.status(400).json(error)
+        console.error(error);
+        res.status(500).json({ error: 'Failed to retrieve employees.' });
     }
-})
+});
 
-app.delete('/employees/:id', async (req,res) => {
-    const employeeId = req.params.id
-
+/**
+ * Delete an employee by ID
+ */
+app.delete('/employees/:id', async (req, res) => {
+    const employeeId = parseInt(req.params.id, 10);
 
     try {
-        
-        const connection = await mysql.createConnection(DB_CONFIG)
-        const getEmployeeImageSql = `SELECT filename FROM employees WHERE id=?`
-        const [ImageResultRows] = await connection.query(getEmployeeImageSql, [parseInt(employeeId)])
+        const connection = await mysql.createConnection(DB_CONFIG);
 
-       
+        // Retrieve the employee's profile picture filename
+        const getEmployeeImageSql = `SELECT filename FROM employees WHERE id = ?`;
+        const [imageResult] = await connection.query(getEmployeeImageSql, [employeeId]);
 
-        if (ImageResultRows.length === 0) {
-            connection.end
-            return res.status(400).json('Employee does not exists')
+        if (imageResult.length === 0) {
+            connection.end();
+            return res.status(404).json({ error: 'Employee does not exist.' });
         }
 
-        const deleteEmployeeSql = `DELETE FROM employees WHERE id=?`
-        await connection.query(deleteEmployeeSql, [parseInt(employeeId)])
+        // Delete employee record
+        const deleteEmployeeSql = `DELETE FROM employees WHERE id = ?`;
+        await connection.query(deleteEmployeeSql, [employeeId]);
 
-        const imagePath = path.join(__dirname, '../frontend/public', ImageResultRows[0].filename)
+        // Delete profile picture file
+        const imagePath = path.join(__dirname, '../frontend/public', imageResult[0].filename);
+        await fs.unlink(imagePath);
 
-        await fs.unlink(imagePath)
-
-        connection.end()
-
-        return res.status(200).json('employee deleted successfully')
-
-    } catch(error) {
-        return res.status(400).json(error)
+        connection.end();
+        res.status(200).json({ message: 'Employee deleted successfully.' });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Failed to delete employee.' });
     }
-})
+});
 
+// Start the server
 app.listen(port, () => {
-    console.log(`App listening on port ${port}`)
-})
+    console.log(`App listening on port ${port}`);
+});
